@@ -1,4 +1,4 @@
-name: Build WholeBrain Mobile Authorized Voice Mimic v0.6 FIXED
+name: Build WholeBrain Mobile Authorized Voice Mimic v0.6 PURE-KOTLIN FIXED
 
 on:
   workflow_dispatch:
@@ -39,19 +39,27 @@ jobs:
           test -x _src/scripts/test_host.sh
           grep -q 'versionName = "0.6.0"' _src/app/build.gradle.kts
           grep -q 'versionCode = 9' _src/app/build.gradle.kts
-          test -f _src/app/src/main/cpp/voice_mimic.cpp
-          test -f _src/app/src/main/java/com/eyalshemuel/wholebrainmobile/output/NativeVoiceMimic.kt
+
+          # v0.6 source uses the verified pure-Kotlin authorized mimic path.
+          test -f _src/app/src/main/java/com/eyalshemuel/wholebrainmobile/output/AuthorizedVoiceMimic.kt
+          test -f _src/app/src/main/java/com/eyalshemuel/wholebrainmobile/output/VoiceMimicDsp.kt
+          test -f _src/host-tests/VoiceMimicDspTest.kt
           test -f _src/V0_6_AUTHORIZED_VOICE_MIMIC_REPORT_HE.md
+
+          # Offline/privacy gates.
           ! grep -q 'android.permission.INTERNET' _src/app/src/main/AndroidManifest.xml
-          grep -q 'voice_profiles/' _src/app/src/main/res/xml/backup_rules.xml
-          grep -q 'voice_profiles/' _src/app/src/main/res/xml/data_extraction_rules.xml
+          grep -q 'wholebrain-voice-mimic.xml' _src/app/src/main/res/xml/backup_rules.xml
+          grep -q 'wholebrain-voice-mimic.xml' _src/app/src/main/res/xml/data_extraction_rules.xml
 
           cp "$SOURCE_ZIP" WholeBrainMobile_SOURCE_v0.6.0-CI.zip
           sha256sum WholeBrainMobile_SOURCE_v0.6.0-CI.zip > WholeBrainMobile_SOURCE_v0.6.0-CI.zip.sha256
 
-      - name: Native scientific, sensory, trace, and voice gates
+      - name: Native scientific sensory learning and voice gates
         working-directory: _src
-        run: ./scripts/test_host.sh | tee host-tests/V0_6_CI_TEST_OUTPUT.txt
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./scripts/test_host.sh | tee host-tests/V0_6_CI_TEST_OUTPUT.txt
 
       - uses: actions/setup-java@v5
         with:
@@ -94,7 +102,9 @@ jobs:
 
       - name: Package APK
         working-directory: _src
+        shell: bash
         run: |
+          set -euo pipefail
           chmod +x scripts/package_release.sh
           ./scripts/package_release.sh
 
@@ -111,7 +121,7 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: wholebrain-mobile-0.6.0-authorized-voice-mimic-fixed
+          name: wholebrain-mobile-0.6.0-authorized-voice-mimic-pure-kotlin-fixed
           path: |
             _src/dist/WholeBrainMobile-0.6.0-AuthorizedVoiceMimic-debug.apk
             _src/dist/WholeBrainMobile-0.6.0-AuthorizedVoiceMimic-debug.apk.sha256
