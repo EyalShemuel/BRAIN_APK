@@ -54,6 +54,131 @@ jobs:
           unzip -q "$INNER" -d _src
 
           test -f _src/settings.gradle.kts
+          test -f _src/build.gradle.kts
+          test -f _src/app/build.gradle.kts
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: android-actions/setup-android@v3
+
+      - name: Install SDK / NDK
+        run: |
+          yes | sdkmanager --licenses >/dev/null || true
+
+          sdkmanager \
+            'platforms;android-36' \
+            'build-tools;36.0.0' \
+            'ndk;28.2.13676358'
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '9.6.0'
+
+      - name: Patch project for AGP 9 built-in Kotlin
+        working-directory: _src
+        run: |
+          set -euo pipefail
+
+          echo "=== BEFORE ==="
+          grep -n "compileSdk" app/build.gradle.kts || true
+          grep -n "org.jetbrains.kotlin.android" build.gradle.kts app/build.gradle.kts || true
+          grep -n "kotlinOptions" app/build.gradle.kts || true
+
+          # GitHub runner currently provides stable Android API 36.
+          sed -i \
+            's/compileSdk = 37/compileSdk = 36/' \
+            app/build.gradle.kts
+
+          # AGP 9 has built-in Kotlin.
+          # Remove the obsolete Kotlin Android plugin from both levels.
+          sed -i \
+            '/id("org.jetbrains.kotlin.android")/d' \
+            build.gradle.kts
+
+          sed -i \
+            '/id("org.jetbrains.kotlin.android")/d' \
+            app/build.gradle.kts
+
+          # Built-in Kotlin no longer uses android.kotlinOptions.
+          # jvmTarget=17 is unnecessary because compileOptions already targets Java 17.
+          perl -0pi -e \
+            's/\n\s*kotlinOptions\s*\{\s*jvmTarget\s*=\s*"17"\s*\}\s*\n/\n/s' \
+            app/build.gradle.kts
+
+          echo "=== AFTER ==="
+          grep -n "compileSdk" app/build.gradle.kts
+
+          if grep -R 'org.jetbrains.kotlin.android' \
+            build.gradle.kts app/build.gradle.kts; then
+            echo "ERROR: obsolete kotlin-android plugin still present"
+            exit 1
+          fi
+
+          if grep -n 'kotlinOptions' app/build.gradle.kts; then
+            echo "ERROR: old kotlinOptions DSL still present"
+            exit 1
+          fi
+
+          echo "AGP 9 Kotlin migration patch: OK"
+
+      - name: Gradle configuration check
+        working-directory: _src
+        run: |
+          gradle --no-daemon help
+
+      - name: Build debug APK
+        working-directory: _src
+        run: |
+          gradle --no-daemon :app:assembleDebug
+
+      - name: Package APK
+        working-directory: _src
+        run: |
+          chmod +x scripts/package_release.sh
+          ./scripts/package_release.sh
+
+      - name: Verify APK exists
+        working-directory: _src
+        run: |
+          set -euo pipefail
+
+          test -f dist/WholeBrainMobile-debug.apk
+
+          echo "=== APK ==="
+          ls -lh dist/WholeBrainMobile-debug.apk
+
+          echo "=== SHA-256 ==="
+          sha256sum dist/WholeBrainMobile-debug.apk
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wholebrain-mobile-debug-apk
+          path: |
+            _src/dist/WholeBrainMobile-debug.apk
+            _src/dist/WholeBrainMobile-debug.apk.sha256
+          if-no-files-found: error  apk:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Unpack source
+        run: |
+          set -euo pipefail
+          rm -rf _handoff _src
+          mkdir -p _handoff _src
+
+          unzip -q WholeBrainMobile_HANDOFF_v0.1.zip -d _handoff
+
+          INNER=$(find _handoff -type f -name 'WholeBrainMobile_SOURCE_v0.1.zip' | head -1)
+          test -n "$INNER"
+
+          unzip -q "$INNER" -d _src
+
+          test -f _src/settings.gradle.kts
           test -f _src/app/build.gradle.kts
 
       - uses: actions/setup-java@v4
