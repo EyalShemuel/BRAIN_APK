@@ -36,6 +36,17 @@ jobs:
           echo "Using source: $SOURCE_ZIP"
           unzip -q "$SOURCE_ZIP" -d _src
 
+          # Source archives must never carry generated CMake/Gradle outputs into CI.
+          rm -rf \
+            _src/host-tests/build \
+            _src/app/.cxx \
+            _src/app/build \
+            _src/build \
+            _src/.gradle
+
+          # Fail if any stale CMake cache survived sanitization.
+          test -z "$(find _src -name CMakeCache.txt -print -quit)"
+
           test -x _src/scripts/test_host.sh
           grep -q 'versionName = "0.6.0"' _src/app/build.gradle.kts
           grep -q 'versionCode = 9' _src/app/build.gradle.kts
@@ -51,7 +62,12 @@ jobs:
           grep -q 'wholebrain-voice-mimic.xml' _src/app/src/main/res/xml/backup_rules.xml
           grep -q 'wholebrain-voice-mimic.xml' _src/app/src/main/res/xml/data_extraction_rules.xml
 
-          cp "$SOURCE_ZIP" WholeBrainMobile_SOURCE_v0.6.0-CI.zip
+          # Archive the sanitized source used by this exact CI run.
+          (
+            cd _src
+            zip -qr "$GITHUB_WORKSPACE/WholeBrainMobile_SOURCE_v0.6.0-CI.zip" . \
+              -x 'host-tests/build/*' 'app/.cxx/*' 'app/build/*' 'build/*' '.gradle/*'
+          )
           sha256sum WholeBrainMobile_SOURCE_v0.6.0-CI.zip > WholeBrainMobile_SOURCE_v0.6.0-CI.zip.sha256
 
       - name: Native scientific sensory learning and voice gates
