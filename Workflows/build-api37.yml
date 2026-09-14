@@ -1,0 +1,145 @@
+name: Build WholeBrain Mobile APK API37
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main ]
+    paths:
+      - 'WholeBrainMobile_HANDOFF_v0.1.zip'
+      - '.github/workflows/build-api37.yml'
+
+jobs:
+  host-native:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Unpack source
+        run: |
+          set -euo pipefail
+          rm -rf _handoff _src
+          mkdir -p _handoff _src
+          unzip -q WholeBrainMobile_HANDOFF_v0.1.zip -d _handoff
+          INNER=$(find _handoff -type f -name 'WholeBrainMobile_SOURCE_v0.1.zip' | head -1)
+          test -n "$INNER"
+          unzip -q "$INNER" -d _src
+          test -x _src/scripts/test_host.sh
+
+      - name: Native scientific gates
+        working-directory: _src
+        run: ./scripts/test_host.sh
+
+  apk:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Unpack source
+        run: |
+          set -euo pipefail
+          rm -rf _handoff _src
+          mkdir -p _handoff _src
+          unzip -q WholeBrainMobile_HANDOFF_v0.1.zip -d _handoff
+          INNER=$(find _handoff -type f -name 'WholeBrainMobile_SOURCE_v0.1.zip' | head -1)
+          test -n "$INNER"
+          unzip -q "$INNER" -d _src
+          test -f _src/settings.gradle.kts
+          test -f _src/build.gradle.kts
+          test -f _src/app/build.gradle.kts
+
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: android-actions/setup-android@v3
+
+      - name: Install Android API 37 Preview / Build Tools / NDK
+        run: |
+          set -euo pipefail
+          yes | sdkmanager --licenses >/dev/null || true
+
+          echo '=== API 37 candidates visible to sdkmanager ==='
+          sdkmanager --list --channel=3 | grep -E 'platforms;android-(37|Cinnamon|cinnamon)|build-tools;36\.0\.0|ndk;28\.2\.13676358' || true
+
+          PLATFORM=$(sdkmanager --list --channel=3 | awk -F'|' '
+            /platforms;android-37/ {
+              gsub(/^[ \t]+|[ \t]+$/, "", $1)
+              print $1
+              exit
+            }
+          ')
+
+          if [ -z "$PLATFORM" ]; then
+            echo 'ERROR: Android API 37 platform was not found even with sdkmanager --channel=3'
+            exit 1
+          fi
+
+          echo "Installing platform: $PLATFORM"
+          sdkmanager --channel=3 \
+            "$PLATFORM" \
+            'build-tools;36.0.0' \
+            'ndk;28.2.13676358'
+
+          test -f "$ANDROID_SDK_ROOT/platforms/android-37/android.jar"
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '9.6.0'
+
+      - name: Patch project for AGP 9 built-in Kotlin
+        working-directory: _src
+        run: |
+          set -euo pipefail
+
+          # AGP 9 has built-in Kotlin support. Remove the obsolete Kotlin Android plugin.
+          sed -i '/id("org.jetbrains.kotlin.android")/d' build.gradle.kts
+          sed -i '/id("org.jetbrains.kotlin.android")/d' app/build.gradle.kts
+
+          # Built-in Kotlin no longer uses android.kotlinOptions.
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('app/build.gradle.kts')
+          s = p.read_text()
+          s = s.replace('    kotlinOptions {\n        jvmTarget = "17"\n    }\n', '')
+          p.write_text(s)
+          PY
+
+          echo '=== Build configuration after patch ==='
+          grep -n 'compileSdk' app/build.gradle.kts
+          grep -n 'targetSdk' app/build.gradle.kts
+
+          grep -q 'compileSdk = 37' app/build.gradle.kts
+          ! grep -R 'org.jetbrains.kotlin.android' build.gradle.kts app/build.gradle.kts
+          ! grep -n 'kotlinOptions' app/build.gradle.kts
+
+      - name: Gradle configuration check
+        working-directory: _src
+        run: gradle --no-daemon help --stacktrace
+
+      - name: Build debug APK
+        working-directory: _src
+        run: gradle --no-daemon :app:assembleDebug --stacktrace
+
+      - name: Package APK
+        working-directory: _src
+        run: |
+          chmod +x scripts/package_release.sh
+          ./scripts/package_release.sh
+
+      - name: Verify APK
+        working-directory: _src
+        run: |
+          set -euo pipefail
+          test -f dist/WholeBrainMobile-debug.apk
+          ls -lh dist/WholeBrainMobile-debug.apk
+          sha256sum dist/WholeBrainMobile-debug.apk
+          test -f dist/WholeBrainMobile-debug.apk.sha256
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wholebrain-mobile-debug-apk-api37
+          path: |
+            _src/dist/WholeBrainMobile-debug.apk
+            _src/dist/WholeBrainMobile-debug.apk.sha256
+          if-no-files-found: error
