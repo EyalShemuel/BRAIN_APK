@@ -1,0 +1,100 @@
+name: Build WholeBrain Mobile Premium UI v0.4
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main ]
+    paths:
+      - 'WholeBrainMobile_SOURCE_v0.4.0.zip'
+      - '.github/workflows/build-premium-ui-v0-4.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Unpack exact v0.4 source
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf _src
+          mkdir -p _src
+          unzip -q WholeBrainMobile_SOURCE_v0.4.0.zip -d _src
+          test -x _src/scripts/test_host.sh
+          grep -q 'versionName = "0.4.0"' _src/app/build.gradle.kts
+          grep -q 'versionCode = 7' _src/app/build.gradle.kts
+          grep -q 'Premium UI/UX' _src/PREMIUM_UI_UX_V0_4_REPORT_HE.md
+          grep -q 'enum class AppTab' _src/app/src/main/java/com/eyalshemuel/wholebrainmobile/WholeBrainApp.kt
+          grep -q 'Touch sensor pad' _src/app/src/main/java/com/eyalshemuel/wholebrainmobile/WholeBrainApp.kt
+
+      - name: Native scientific and sensory gates
+        working-directory: _src
+        run: ./scripts/test_host.sh
+
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: android-actions/setup-android@v3
+
+      - name: Install Android CLI and API 37.2
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl -fsSL https://dl.google.com/android/cli/latest/linux_x86_64/install.sh | bash
+          ANDROID_BIN="$(command -v android || true)"
+          if [ -z "$ANDROID_BIN" ]; then
+            ANDROID_BIN="$(find "$HOME" -type f -name android -perm -u+x 2>/dev/null | head -1 || true)"
+          fi
+          test -n "$ANDROID_BIN"
+          "$ANDROID_BIN" --version
+          "$ANDROID_BIN" --sdk="$ANDROID_SDK_ROOT" sdk install --canary \
+            platforms/android-37.2 \
+            build-tools/36.0.0 \
+            ndk/28.2.13676358
+          test -f "$ANDROID_SDK_ROOT/platforms/android-37.2/android.jar"
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '9.6.0'
+
+      - name: Gradle configuration check
+        working-directory: _src
+        run: gradle --no-daemon help --stacktrace
+
+      - name: Build debug APK
+        working-directory: _src
+        run: gradle --no-daemon :app:assembleDebug --stacktrace
+
+      - name: Package APK
+        working-directory: _src
+        run: ./scripts/package_release.sh
+
+      - name: Verify APK
+        working-directory: _src
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -f dist/WholeBrainMobile-0.4.0-PremiumUX-debug.apk
+          test -f dist/WholeBrainMobile-0.4.0-PremiumUX-debug.apk.sha256
+          sha256sum -c dist/WholeBrainMobile-0.4.0-PremiumUX-debug.apk.sha256
+          ls -lh dist/WholeBrainMobile-0.4.0-PremiumUX-debug.apk
+          sha256sum dist/WholeBrainMobile-0.4.0-PremiumUX-debug.apk
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wholebrain-mobile-0.4.0-premium-ui
+          path: |
+            _src/dist/WholeBrainMobile-0.4.0-PremiumUX-debug.apk
+            _src/dist/WholeBrainMobile-0.4.0-PremiumUX-debug.apk.sha256
+            _src/dist/WholeBrainMobile-debug.apk
+            _src/dist/WholeBrainMobile-debug.apk.sha256
+            WholeBrainMobile_SOURCE_v0.4.0.zip
+            _src/PREMIUM_UI_UX_V0_4_REPORT_HE.md
+            _src/host-tests/V3_SENSORY_TEST_OUTPUT.txt
+          if-no-files-found: error
