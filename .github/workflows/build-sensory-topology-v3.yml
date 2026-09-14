@@ -1,0 +1,104 @@
+name: Build WholeBrain Mobile Sensory Topology v3
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main ]
+    paths:
+      - 'WholeBrainMobile_HANDOFF_v0.3.zip'
+      - '.github/workflows/build-sensory-topology-v3.yml'
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Unpack exact v0.3 source
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf _handoff _src
+          mkdir -p _handoff _src
+          unzip -q WholeBrainMobile_HANDOFF_v0.3.zip -d _handoff
+          INNER=$(find _handoff -type f -name 'WholeBrainMobile_SOURCE_v0.3.zip' | head -1)
+          test -n "$INNER"
+          if [ -f _handoff/WholeBrainMobile_SOURCE_v0.3.zip.sha256 ]; then
+            (cd _handoff && sha256sum -c WholeBrainMobile_SOURCE_v0.3.zip.sha256)
+          fi
+          unzip -q "$INNER" -d _src
+          test -x _src/scripts/test_host.sh
+          test -f _src/SENSORY_TOPOLOGY_V3_REPORT_HE.md
+          grep -q 'versionName = "0.3.0"' _src/app/build.gradle.kts
+          ! grep -R 'org.jetbrains.kotlin.android' _src/build.gradle.kts _src/app/build.gradle.kts
+          ! grep -n 'kotlinOptions' _src/app/build.gradle.kts
+          grep -q 'minorApiLevel = 2' _src/app/build.gradle.kts
+
+      - name: Native scientific and sensory gates
+        working-directory: _src
+        run: ./scripts/test_host.sh
+
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: android-actions/setup-android@v3
+
+      - name: Install Android CLI and API 37.2
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl -fsSL https://dl.google.com/android/cli/latest/linux_x86_64/install.sh | bash
+          ANDROID_BIN="$(command -v android || true)"
+          if [ -z "$ANDROID_BIN" ]; then
+            ANDROID_BIN="$(find "$HOME" -type f -name android -perm -u+x 2>/dev/null | head -1 || true)"
+          fi
+          test -n "$ANDROID_BIN"
+          "$ANDROID_BIN" --version
+          "$ANDROID_BIN" --sdk="$ANDROID_SDK_ROOT" sdk install --canary \
+            platforms/android-37.2 \
+            build-tools/36.0.0 \
+            ndk/28.2.13676358
+          test -f "$ANDROID_SDK_ROOT/platforms/android-37.2/android.jar"
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '9.6.0'
+
+      - name: Gradle configuration check
+        working-directory: _src
+        run: gradle --no-daemon help --stacktrace
+
+      - name: Build debug APK
+        working-directory: _src
+        run: gradle --no-daemon :app:assembleDebug --stacktrace
+
+      - name: Package APK
+        working-directory: _src
+        run: ./scripts/package_release.sh
+
+      - name: Verify APK and source identity
+        working-directory: _src
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -f dist/WholeBrainMobile-0.3.0-SensoryTopology-debug.apk
+          test -f dist/WholeBrainMobile-0.3.0-SensoryTopology-debug.apk.sha256
+          sha256sum -c dist/WholeBrainMobile-0.3.0-SensoryTopology-debug.apk.sha256
+          ls -lh dist/WholeBrainMobile-0.3.0-SensoryTopology-debug.apk
+          sha256sum dist/WholeBrainMobile-0.3.0-SensoryTopology-debug.apk
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wholebrain-mobile-0.3.0-sensory-topology
+          path: |
+            _src/dist/WholeBrainMobile-0.3.0-SensoryTopology-debug.apk
+            _src/dist/WholeBrainMobile-0.3.0-SensoryTopology-debug.apk.sha256
+            _src/dist/WholeBrainMobile-debug.apk
+            _src/dist/WholeBrainMobile-debug.apk.sha256
+            _handoff/WholeBrainMobile_SOURCE_v0.3.zip
+            _handoff/WholeBrainMobile_SOURCE_v0.3.zip.sha256
+            _src/SENSORY_TOPOLOGY_V3_REPORT_HE.md
+            _src/host-tests/V3_SENSORY_TEST_OUTPUT.txt
+          if-no-files-found: error
