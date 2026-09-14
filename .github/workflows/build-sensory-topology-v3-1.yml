@@ -1,0 +1,132 @@
+name: Build WholeBrain Mobile Sensory Topology v3.1
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main ]
+    paths:
+      - '.github/workflows/build-sensory-topology-v3-1.yml'
+      - 'WholeBrainMobile_HANDOFF_v0.3.zip'
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Unpack v0.3 and apply Android compile fix
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf _handoff _src _artifact
+          mkdir -p _handoff _src _artifact
+          unzip -q WholeBrainMobile_HANDOFF_v0.3.zip -d _handoff
+          INNER=$(find _handoff -type f -name 'WholeBrainMobile_SOURCE_v0.3.zip' | head -1)
+          test -n "$INNER"
+          if [ -f _handoff/WholeBrainMobile_SOURCE_v0.3.zip.sha256 ]; then
+            (cd _handoff && sha256sum -c WholeBrainMobile_SOURCE_v0.3.zip.sha256)
+          fi
+          unzip -q "$INNER" -d _src
+
+          python3 - <<'PY'
+          from pathlib import Path
+
+          app = Path('_src/app/src/main/java/com/eyalshemuel/wholebrainmobile/WholeBrainApp.kt')
+          s = app.read_text()
+          s = s.replace('import androidx.compose.ui.input.pointer.awaitPointerEventScope\n', '')
+          app.write_text(s)
+
+          hub = Path('_src/app/src/main/java/com/eyalshemuel/wholebrainmobile/sensors/SensorHub.kt')
+          s = hub.read_text()
+          old = '        sensors.unregisterListener(this);runCatching{sensors.cancelTriggerSensor(triggerListener)};runCatching{location.removeUpdates(this)}\n'
+          new = '''        sensors.unregisterListener(this)\n        sensors.getSensorList(Sensor.TYPE_ALL)\n            .filter { it.reportingMode == Sensor.REPORTING_MODE_ONE_SHOT }\n            .forEach { sensor -> runCatching { sensors.cancelTriggerSensor(triggerListener, sensor) } }\n        runCatching{location.removeUpdates(this)}\n'''
+          if old not in s:
+              raise SystemExit('Expected SensorHub v0.3 stop() line not found')
+          hub.write_text(s.replace(old, new))
+
+          gradle = Path('_src/app/build.gradle.kts')
+          s = gradle.read_text().replace('versionCode = 3', 'versionCode = 4').replace('versionName = "0.3.0"', 'versionName = "0.3.1"')
+          gradle.write_text(s)
+
+          pkg = Path('_src/scripts/package_release.sh')
+          s = pkg.read_text().replace('WholeBrainMobile-0.3.0-SensoryTopology-debug.apk', 'WholeBrainMobile-0.3.1-SensoryTopology-debug.apk')
+          pkg.write_text(s)
+          PY
+
+          test -x _src/scripts/test_host.sh
+          grep -q 'versionName = "0.3.1"' _src/app/build.gradle.kts
+          ! grep -q 'import androidx.compose.ui.input.pointer.awaitPointerEventScope' _src/app/src/main/java/com/eyalshemuel/wholebrainmobile/WholeBrainApp.kt
+          grep -q 'cancelTriggerSensor(triggerListener, sensor)' _src/app/src/main/java/com/eyalshemuel/wholebrainmobile/sensors/SensorHub.kt
+
+      - name: Native scientific and sensory gates
+        working-directory: _src
+        run: ./scripts/test_host.sh | tee host-tests/V3_1_SENSORY_TEST_OUTPUT.txt
+
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: android-actions/setup-android@v3
+
+      - name: Install Android CLI and API 37.2
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl -fsSL https://dl.google.com/android/cli/latest/linux_x86_64/install.sh | bash
+          ANDROID_BIN="$(command -v android || true)"
+          if [ -z "$ANDROID_BIN" ]; then
+            ANDROID_BIN="$(find "$HOME" -type f -name android -perm -u+x 2>/dev/null | head -1 || true)"
+          fi
+          test -n "$ANDROID_BIN"
+          "$ANDROID_BIN" --version
+          "$ANDROID_BIN" --sdk="$ANDROID_SDK_ROOT" sdk install --canary \
+            platforms/android-37.2 \
+            build-tools/36.0.0 \
+            ndk/28.2.13676358
+          test -f "$ANDROID_SDK_ROOT/platforms/android-37.2/android.jar"
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '9.6.0'
+
+      - name: Gradle configuration check
+        working-directory: _src
+        run: gradle --no-daemon help --stacktrace
+
+      - name: Build debug APK
+        working-directory: _src
+        run: gradle --no-daemon :app:assembleDebug --stacktrace
+
+      - name: Package APK and exact source
+        shell: bash
+        run: |
+          set -euo pipefail
+          (cd _src && ./scripts/package_release.sh)
+          test -f _src/dist/WholeBrainMobile-0.3.1-SensoryTopology-debug.apk
+          sha256sum -c _src/dist/WholeBrainMobile-0.3.1-SensoryTopology-debug.apk.sha256
+
+          cp _src/dist/WholeBrainMobile-0.3.1-SensoryTopology-debug.apk _artifact/
+          cp _src/dist/WholeBrainMobile-0.3.1-SensoryTopology-debug.apk.sha256 _artifact/
+          cp _src/dist/WholeBrainMobile-debug.apk _artifact/
+          cp _src/dist/WholeBrainMobile-debug.apk.sha256 _artifact/
+          sha256sum _artifact/WholeBrainMobile-0.3.1-SensoryTopology-debug.apk
+
+          rm -rf _src/app/build _src/host-tests/build _src/.gradle _src/dist
+          (cd _src && zip -qr ../_artifact/WholeBrainMobile_SOURCE_v0.3.1.zip .)
+          (cd _artifact && sha256sum WholeBrainMobile_SOURCE_v0.3.1.zip > WholeBrainMobile_SOURCE_v0.3.1.zip.sha256)
+          cat _artifact/WholeBrainMobile_SOURCE_v0.3.1.zip.sha256
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wholebrain-mobile-0.3.1-sensory-topology
+          path: |
+            _artifact/WholeBrainMobile-0.3.1-SensoryTopology-debug.apk
+            _artifact/WholeBrainMobile-0.3.1-SensoryTopology-debug.apk.sha256
+            _artifact/WholeBrainMobile-debug.apk
+            _artifact/WholeBrainMobile-debug.apk.sha256
+            _artifact/WholeBrainMobile_SOURCE_v0.3.1.zip
+            _artifact/WholeBrainMobile_SOURCE_v0.3.1.zip.sha256
+            _src/SENSORY_TOPOLOGY_V3_REPORT_HE.md
+            _src/host-tests/V3_1_SENSORY_TEST_OUTPUT.txt
+          if-no-files-found: error
