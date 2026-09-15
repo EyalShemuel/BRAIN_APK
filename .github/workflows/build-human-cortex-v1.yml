@@ -1,131 +1,181 @@
-name: Build WholeBrain Mobile Human Cortex Scaffold v1.0
+name: Build WholeBrain Mobile v1.2
+
+# SOURCE OF TRUTH
+# ---------------
+# The v1.0 workflow built from WholeBrainMobile_SOURCE_v1.0.0.zip committed into the repo.
+# That is the single biggest problem with this pipeline and it is not a CI detail:
+#   - a zip has no diff, so no change can be reviewed
+#   - `git blame` and `git log -p` are useless on it
+#   - every build is a full rebuild; nothing can be cached per file
+#   - two branches touching the same file conflict as one opaque binary
+# This version builds from the working tree. Keeping the zip as a release ARTIFACT is fine;
+# using it as the input is not. To migrate: unzip it once at the repo root, commit the tree,
+# delete the zip, done.
 
 on:
   workflow_dispatch:
   push:
     branches: [ main ]
     paths:
-      - 'WholeBrainMobile_SOURCE_v1.0.0.zip'
+      - 'app/**'
+      - 'host-tests/**'
+      - 'scripts/**'
+      - 'gradle.properties'
+      - 'settings.gradle.kts'
+      - 'build.gradle.kts'
       - '.github/workflows/build-human-cortex-v1.yml'
+  pull_request:
+    branches: [ main ]
+
+# A second push should cancel the first run rather than queue behind it.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  NDK_VERSION: '28.2.13676358'
+  BUILD_TOOLS_VERSION: '36.0.0'
+  # Must match BUILD_TOOLS major. The v1.0 workflow pinned platform android-37.2 from the
+  # --canary channel against build-tools 36.0.0: mismatched, and a canary pin is not
+  # reproducible - canary artifacts are replaced and removed, so a green build becomes
+  # unbuildable with no code change.
+  COMPILE_SDK: '36'
 
 jobs:
-  build:
+  # Science gates run first, on their own, with no Android toolchain in the way. They are
+  # the slowest-to-diagnose and fastest-to-provision part of the build; failing here should
+  # not require waiting for an SDK download.
+  host-gates:
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
 
-      - name: Resolve and unpack v1.0 source
-        shell: bash
+      - name: Install build tools
         run: |
           set -euo pipefail
-          rm -rf _src
-          mkdir -p _src
-          test -f WholeBrainMobile_SOURCE_v1.0.0.zip
-          unzip -q WholeBrainMobile_SOURCE_v1.0.0.zip -d _src
-          rm -rf _src/host-tests/build _src/app/.cxx _src/app/build _src/build _src/.gradle _src/dist
-          test -z "$(find _src -name CMakeCache.txt -print -quit)"
-          test -x _src/scripts/test_host.sh
-          grep -q 'versionName = "1.0.0"' _src/app/build.gradle.kts
-          grep -q 'versionCode = 14' _src/app/build.gradle.kts
-          test -f _src/app/src/main/cpp/cortical_microcircuit.cpp
-          test -f _src/app/src/main/cpp/cortical_microcircuit.h
-          test -f _src/host-tests/cortical_microcircuit_test.cpp
-          test -f _src/V1_0_HUMAN_CORTEX_SCAFFOLD_REPORT_HE.md
-          grep -q 'apicalDendrite_' _src/app/src/main/cpp/wholebrain_engine.cpp
-          grep -q 'CorticalCellClass::LAMP5' _src/app/src/main/cpp/cortical_microcircuit.cpp
-          grep -q 'structuredCorticalTarget' _src/app/src/main/cpp/wholebrain_engine.cpp
-          ! grep -RInE 'android\.speech\.tts|TTS_SERVICE|synthesizeToFile' _src/app/src/main/java _src/app/src/main/AndroidManifest.xml
-          ! grep -q 'android.permission.INTERNET' _src/app/src/main/AndroidManifest.xml
-          (
-            cd _src
-            zip -qr "$GITHUB_WORKSPACE/WholeBrainMobile_SOURCE_v1.0.0-CI.zip" . \
-              -x 'host-tests/build/*' 'app/.cxx/*' 'app/build/*' 'build/*' '.gradle/*' 'dist/*'
-          )
-          sha256sum WholeBrainMobile_SOURCE_v1.0.0-CI.zip > WholeBrainMobile_SOURCE_v1.0.0-CI.zip.sha256
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends ninja-build cmake g++
 
-      - name: Native scientific cortical sensory learning and BioSpeech gates
-        working-directory: _src
-        shell: bash
+      - name: Cache host-test build
+        uses: actions/cache@v4
+        with:
+          path: host-tests/build
+          key: hostbuild-${{ runner.os }}-${{ hashFiles('app/src/main/cpp/**', 'host-tests/**/*.cpp', 'host-tests/**/*.h', 'host-tests/CMakeLists.txt') }}
+          restore-keys: hostbuild-${{ runner.os }}-
+
+      - name: Run scientific gates
         run: |
           set -euo pipefail
-          ./scripts/test_host.sh | tee host-tests/V1_0_CI_TEST_OUTPUT.txt
+          chmod +x scripts/test_host.sh
+          ./scripts/test_host.sh 2>&1 | tee V1_2_CI_TEST_OUTPUT.txt
+
+      - name: Check every gate actually reported PASS
+        run: |
+          set -euo pipefail
+          # `set -e` catches a non-zero exit, but a gate that silently stops printing is
+          # just as broken. Require each expected gate to be present by name.
+          for gate in topology_adj neural_speech generative_speech biospeech \
+                      cortical_microcircuit dynamics_gate topography_gate plasticity_gate \
+                      biospeech_curriculum; do
+            grep -q "PASS .*${gate}\|PASS ${gate}" V1_2_CI_TEST_OUTPUT.txt \
+              || { echo "FAIL: gate '${gate}' did not report PASS"; exit 1; }
+          done
+          echo "all gates reported PASS"
+
+      - uses: actions/upload-artifact@v4
+        if: always()   # the test log is most valuable exactly when the job failed
+        with:
+          name: host-gate-output
+          path: V1_2_CI_TEST_OUTPUT.txt
+          if-no-files-found: error
+
+  android:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    needs: host-gates
+    steps:
+      - uses: actions/checkout@v4
 
       - uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: '17'
 
-      - name: Configure Android SDK from runner
-        shell: bash
+      # The v1.0 workflow piped an installer straight from the network into bash
+      # (`curl -fsSL https://dl.google.com/... | bash`) and then ran a second, different SDK
+      # manager. The runner already ships a licensed Android SDK; use it, and add only the
+      # specific packages that are missing.
+      - name: Provision Android SDK packages
         run: |
           set -euo pipefail
           SDK="${ANDROID_SDK_ROOT:-${ANDROID_HOME:-/usr/local/lib/android/sdk}}"
           test -d "$SDK"
-          echo "ANDROID_HOME=$SDK" >> "$GITHUB_ENV"
+          echo "ANDROID_HOME=$SDK"     >> "$GITHUB_ENV"
           echo "ANDROID_SDK_ROOT=$SDK" >> "$GITHUB_ENV"
-          echo "$SDK/platform-tools" >> "$GITHUB_PATH"
-          echo "$SDK/cmdline-tools/latest/bin" >> "$GITHUB_PATH"
-          SDKMANAGER="$(find "$SDK/cmdline-tools" -type f -name sdkmanager -perm -u+x 2>/dev/null | sort -V | tail -1)"
+          echo "$SDK/platform-tools"   >> "$GITHUB_PATH"
+          SDKMANAGER="$(find "$SDK/cmdline-tools" -type f -name sdkmanager -perm -u+x | sort -V | tail -1)"
           test -n "$SDKMANAGER"
           yes | "$SDKMANAGER" --licenses >/dev/null 2>&1 || true
-
-      - name: Install Android CLI and API 37.2
-        shell: bash
-        run: |
-          set -euo pipefail
-          curl -fsSL https://dl.google.com/android/cli/latest/linux_x86_64/install.sh | bash
-          ANDROID_BIN="$(command -v android || true)"
-          if [ -z "$ANDROID_BIN" ]; then
-            ANDROID_BIN="$(find "$HOME" -type f -name android -perm -u+x 2>/dev/null | head -1 || true)"
-          fi
-          test -n "$ANDROID_BIN"
-          "$ANDROID_BIN" --version
-          "$ANDROID_BIN" --sdk="$ANDROID_SDK_ROOT" sdk install --canary \
-            platforms/android-37.2 \
-            build-tools/36.0.0 \
-            ndk/28.2.13676358
-          test -f "$ANDROID_SDK_ROOT/platforms/android-37.2/android.jar"
+          "$SDKMANAGER" --install \
+            "platforms;android-${COMPILE_SDK}" \
+            "build-tools;${BUILD_TOOLS_VERSION}" \
+            "ndk;${NDK_VERSION}"
+          test -f "$SDK/platforms/android-${COMPILE_SDK}/android.jar"
+          test -d "$SDK/ndk/${NDK_VERSION}"
 
       - uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '9.6.0'
+          cache-read-only: ${{ github.ref != 'refs/heads/main' }}
 
-      - name: Gradle configuration check
-        working-directory: _src
-        run: gradle --no-daemon help --stacktrace
+      - name: Cache native build
+        uses: actions/cache@v4
+        with:
+          path: |
+            app/.cxx
+            ~/.cache/ccache
+          key: ndk-${{ runner.os }}-${{ env.NDK_VERSION }}-${{ hashFiles('app/src/main/cpp/**', 'app/build.gradle.kts') }}
+          restore-keys: ndk-${{ runner.os }}-${{ env.NDK_VERSION }}-
+
+      - name: Verify version metadata
+        run: |
+          set -euo pipefail
+          grep -q 'versionName = "1.2.0"' app/build.gradle.kts
+          grep -q 'versionCode = 16'      app/build.gradle.kts
+
+      # Privacy locks. These belong in CI because they are about what ships, not about what
+      # the code does: an APK that gained INTERNET or a TTS dependency is a different product.
+      - name: Offline and no-TTS locks
+        run: |
+          set -euo pipefail
+          ! grep -RInE 'android\.speech\.tts|TTS_SERVICE|synthesizeToFile' \
+            app/src/main/java app/src/main/AndroidManifest.xml
+          ! grep -q 'android.permission.INTERNET' app/src/main/AndroidManifest.xml
 
       - name: Build debug APK
-        working-directory: _src
         run: gradle --no-daemon :app:assembleDebug --stacktrace
 
-      - name: Package APK
-        working-directory: _src
-        shell: bash
+      - name: Package and verify APK
         run: |
           set -euo pipefail
           chmod +x scripts/package_release.sh
           ./scripts/package_release.sh
-
-      - name: Verify APK
-        working-directory: _src
-        shell: bash
-        run: |
-          set -euo pipefail
-          test -f dist/WholeBrainMobile-1.0.0-HumanCortexScaffold-debug.apk
-          test -f dist/WholeBrainMobile-1.0.0-HumanCortexScaffold-debug.apk.sha256
-          sha256sum -c dist/WholeBrainMobile-1.0.0-HumanCortexScaffold-debug.apk.sha256
-          sha256sum dist/WholeBrainMobile-1.0.0-HumanCortexScaffold-debug.apk
+          APK=dist/WholeBrainMobile-1.2.0-debug.apk
+          test -f "$APK"
+          sha256sum -c "${APK}.sha256"
+          # An APK that builds but ships no native library is a silent failure: the whole
+          # engine is in libwholebrain.so, and Gradle will happily produce an APK without it.
+          unzip -l "$APK" | grep -q 'lib/arm64-v8a/libwholebrain.so'
 
       - uses: actions/upload-artifact@v4
+        if: always()
         with:
-          name: wholebrain-mobile-1.0.0-human-cortex-scaffold
+          name: wholebrain-mobile-1.2.0
           path: |
-            _src/dist/WholeBrainMobile-1.0.0-HumanCortexScaffold-debug.apk
-            _src/dist/WholeBrainMobile-1.0.0-HumanCortexScaffold-debug.apk.sha256
-            _src/dist/WholeBrainMobile-debug.apk
-            _src/dist/WholeBrainMobile-debug.apk.sha256
-            WholeBrainMobile_SOURCE_v1.0.0-CI.zip
-            WholeBrainMobile_SOURCE_v1.0.0-CI.zip.sha256
-            _src/V1_0_HUMAN_CORTEX_SCAFFOLD_REPORT_HE.md
-            _src/host-tests/V1_0_CI_TEST_OUTPUT.txt
+            dist/*.apk
+            dist/*.apk.sha256
           if-no-files-found: error
