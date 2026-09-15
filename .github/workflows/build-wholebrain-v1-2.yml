@@ -28,13 +28,13 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          rm -rf _src _unpack
-          mkdir -p _src _unpack
+          rm -rf _src _unpack _inner
+          mkdir -p _src _unpack _inner
 
-          if [ -f WholeBrainMobile_v1.2.0_github-ready.zip ]; then
-            SOURCE_ZIP="$PWD/WholeBrainMobile_v1.2.0_github-ready.zip"
-          elif [ -f WholeBrainMobile_SOURCE_v1.2.0.zip ]; then
+          if [ -f WholeBrainMobile_SOURCE_v1.2.0.zip ]; then
             SOURCE_ZIP="$PWD/WholeBrainMobile_SOURCE_v1.2.0.zip"
+          elif [ -f WholeBrainMobile_v1.2.0_github-ready.zip ]; then
+            SOURCE_ZIP="$PWD/WholeBrainMobile_v1.2.0_github-ready.zip"
           else
             echo "ERROR: v1.2 source ZIP not found"
             exit 1
@@ -43,57 +43,81 @@ jobs:
           echo "Using source: $SOURCE_ZIP"
           unzip -q "$SOURCE_ZIP" -d _unpack
 
-          # Accept either a project at ZIP root or exactly one top-level folder.
-          if [ -f _unpack/app/build.gradle.kts ]; then
-            cp -a _unpack/. _src/
-          else
-            ROOT="$(find _unpack -mindepth 1 -maxdepth 1 -type d | head -1)"
-            test -n "$ROOT"
-            test -f "$ROOT/app/build.gradle.kts"
-            cp -a "$ROOT"/. _src/
+          # Locate the project recursively. A "github-ready" bundle may contain
+          # an extra wrapper directory or an inner source ZIP.
+          PROJECT_BUILD="$(find _unpack -type f -path '*/app/build.gradle.kts' -print -quit)"
+          if [ -z "$PROJECT_BUILD" ]; then
+            INNER_ZIP="$(find _unpack -type f \( -name 'WholeBrainMobile_SOURCE_v1.2.0.zip' -o -name '*v1.2.0*.zip' \) -print -quit)"
+            if [ -n "$INNER_ZIP" ]; then
+              echo "Found inner source ZIP: $INNER_ZIP"
+              unzip -q "$INNER_ZIP" -d _inner
+              PROJECT_BUILD="$(find _inner -type f -path '*/app/build.gradle.kts' -print -quit)"
+            fi
           fi
 
-          rm -rf _unpack
+          if [ -z "$PROJECT_BUILD" ]; then
+            echo "ERROR: app/build.gradle.kts not found in source package"
+            echo "=== package tree ==="
+            find _unpack -maxdepth 4 -print | sort | head -200
+            exit 1
+          fi
+
+          PROJECT_ROOT="${PROJECT_BUILD%/app/build.gradle.kts}"
+          echo "Resolved project root: $PROJECT_ROOT"
+          cp -a "$PROJECT_ROOT"/. _src/
+          rm -rf _unpack _inner
 
           # Never inherit generated local state from the archive.
-          rm -rf \
-            _src/host-tests/build \
-            _src/app/.cxx \
-            _src/app/build \
-            _src/build \
-            _src/.gradle \
-            _src/dist
+          rm -rf             _src/host-tests/build             _src/app/.cxx             _src/app/build             _src/build             _src/.gradle             _src/dist
           test -z "$(find _src -name CMakeCache.txt -print -quit)"
 
+          # ZIP creators on Windows/Python often drop executable permission bits.
+          test -f _src/scripts/test_host.sh
+          test -f _src/scripts/package_release.sh
+          chmod +x _src/scripts/test_host.sh _src/scripts/package_release.sh
+
+          require_file() {
+            test -f "$1" || { echo "ERROR: missing $1"; exit 1; }
+          }
+          require_grep() {
+            local pattern="$1" file="$2"
+            grep -q "$pattern" "$file" || {
+              echo "ERROR: expected pattern '$pattern' in $file"
+              exit 1
+            }
+          }
+
           # Exact release identity.
-          test -x _src/scripts/test_host.sh
-          test -x _src/scripts/package_release.sh
-          grep -q 'versionName = "1.2.0"' _src/app/build.gradle.kts
-          grep -q 'versionCode = 16' _src/app/build.gradle.kts
-          grep -q 'minorApiLevel = 2' _src/app/build.gradle.kts
-          grep -q 'ndkVersion = "28.2.13676358"' _src/app/build.gradle.kts
+          require_grep 'versionName = "1.2.0"' _src/app/build.gradle.kts
+          require_grep 'versionCode = 16' _src/app/build.gradle.kts
+          require_grep 'minorApiLevel = 2' _src/app/build.gradle.kts
+          require_grep 'ndkVersion = "28.2.13676358"' _src/app/build.gradle.kts
 
           # v1.2 scientific locks.
-          test -f _src/app/src/main/cpp/cortical_microcircuit.cpp
-          test -f _src/app/src/main/cpp/biospeech_model.cpp
-          test -f _src/host-tests/dynamics_gate.cpp
-          test -f _src/host-tests/topography_gate.cpp
-          test -f _src/host-tests/plasticity_gate.cpp
-          grep -q 'topographicTarget' _src/app/src/main/cpp/wholebrain_engine.cpp
-          grep -q 'longRangeTargetRegion' _src/app/src/main/cpp/wholebrain_engine.cpp
-          grep -q 'updateHomeostasis' _src/app/src/main/cpp/wholebrain_engine.cpp
-          grep -q 'applyPlasticity' _src/app/src/main/cpp/wholebrain_engine.cpp
+          require_file _src/app/src/main/cpp/cortical_microcircuit.cpp
+          require_file _src/app/src/main/cpp/biospeech_model.cpp
+          require_file _src/host-tests/dynamics_gate.cpp
+          require_file _src/host-tests/topography_gate.cpp
+          require_file _src/host-tests/plasticity_gate.cpp
+          require_grep 'topographicTarget' _src/app/src/main/cpp/wholebrain_engine.cpp
+          require_grep 'longRangeTargetRegion' _src/app/src/main/cpp/wholebrain_engine.cpp
+          require_grep 'updateHomeostasis' _src/app/src/main/cpp/wholebrain_engine.cpp
+          require_grep 'applyPlasticity' _src/app/src/main/cpp/wholebrain_engine.cpp
 
           # Product/privacy locks.
-          ! grep -RInE 'android\.speech\.tts|TTS_SERVICE|synthesizeToFile' \
-            _src/app/src/main/java _src/app/src/main/AndroidManifest.xml
-          ! grep -q 'android.permission.INTERNET' _src/app/src/main/AndroidManifest.xml
+          if grep -RInE 'android\.speech\.tts|TTS_SERVICE|synthesizeToFile'             _src/app/src/main/java _src/app/src/main/AndroidManifest.xml; then
+            echo "ERROR: Android TTS path detected"
+            exit 1
+          fi
+          if grep -q 'android.permission.INTERNET' _src/app/src/main/AndroidManifest.xml; then
+            echo "ERROR: INTERNET permission detected"
+            exit 1
+          fi
 
           # Preserve the exact sanitized source used by CI.
           (
             cd _src
-            zip -qr "$GITHUB_WORKSPACE/WholeBrainMobile_SOURCE_v1.2.0-CI.zip" . \
-              -x 'host-tests/build/*' 'app/.cxx/*' 'app/build/*' 'build/*' '.gradle/*' 'dist/*'
+            zip -qr "$GITHUB_WORKSPACE/WholeBrainMobile_SOURCE_v1.2.0-CI.zip" .               -x 'host-tests/build/*' 'app/.cxx/*' 'app/build/*' 'build/*' '.gradle/*' 'dist/*'
           )
           sha256sum WholeBrainMobile_SOURCE_v1.2.0-CI.zip > WholeBrainMobile_SOURCE_v1.2.0-CI.zip.sha256
 
