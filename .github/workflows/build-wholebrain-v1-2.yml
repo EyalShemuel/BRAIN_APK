@@ -157,31 +157,56 @@ jobs:
           SDKMANAGER="$(find "$ANDROID_SDK_ROOT/cmdline-tools" -type f -name sdkmanager -perm -u+x 2>/dev/null | sort -V | tail -1)"
           test -n "$SDKMANAGER"
 
-          # github-ready variants may use stable API 36, while the original
-          # v1.2 source uses Android 37.2. Install the stable requirements first.
+          # The shipped Compose 1.12 / Lifecycle 2.11 AAR metadata requires
+          # compileSdk >= 37. Keep targetSdk=36, but compile against API 37.2.
           "$SDKMANAGER" --install \
             'platforms;android-36' \
             'build-tools;36.0.0' \
             'ndk;28.2.13676358'
 
-          # If the source actually requests minor API 37.2, install that too.
-          if grep -q 'minorApiLevel[[:space:]]*=[[:space:]]*2' _src/app/build.gradle.kts; then
-            curl -fsSL https://dl.google.com/android/cli/latest/linux_x86_64/install.sh | bash
-            ANDROID_BIN="$(command -v android || true)"
-            if [ -z "$ANDROID_BIN" ]; then
-              ANDROID_BIN="$(find "$HOME" -type f -name android -perm -u+x 2>/dev/null | head -1 || true)"
-            fi
-            test -n "$ANDROID_BIN"
-            "$ANDROID_BIN" --version
-            "$ANDROID_BIN" --sdk="$ANDROID_SDK_ROOT" sdk install --canary \
-              platforms/android-37.2 \
-              build-tools/36.0.0 \
-              ndk/28.2.13676358
-            test -f "$ANDROID_SDK_ROOT/platforms/android-37.2/android.jar"
+          curl -fsSL https://dl.google.com/android/cli/latest/linux_x86_64/install.sh | bash
+          ANDROID_BIN="$(command -v android || true)"
+          if [ -z "$ANDROID_BIN" ]; then
+            ANDROID_BIN="$(find "$HOME" -type f -name android -perm -u+x 2>/dev/null | head -1 || true)"
           fi
+          test -n "$ANDROID_BIN"
+          "$ANDROID_BIN" --version
+          "$ANDROID_BIN" --sdk="$ANDROID_SDK_ROOT" sdk install --canary \
+            platforms/android-37.2 \
+            build-tools/36.0.0 \
+            ndk/28.2.13676358
 
           test -f "$ANDROID_SDK_ROOT/platforms/android-36/android.jar"
+          test -f "$ANDROID_SDK_ROOT/platforms/android-37.2/android.jar"
           test -d "$ANDROID_SDK_ROOT/ndk/28.2.13676358"
+
+      - name: Patch compileSdk to API 37.2 for CI build
+        working-directory: _src
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY2'
+          from pathlib import Path
+          p = Path('app/build.gradle.kts')
+          s = p.read_text()
+          if 'minorApiLevel = 2' not in s:
+              old = '    compileSdk = 36\n'
+              if old not in s:
+                  raise SystemExit('ERROR: expected compileSdk = 36 or an existing 37.2 block')
+              s = s.replace(
+                  old,
+                  '    compileSdk {\n'
+                  '        version = release(37) {\n'
+                  '            minorApiLevel = 2\n'
+                  '        }\n'
+                  '    }\n',
+                  1,
+              )
+              p.write_text(s)
+          PY2
+          grep -n -A7 -B2 'compileSdk' app/build.gradle.kts
+          grep -q 'minorApiLevel = 2' app/build.gradle.kts
+          grep -q 'targetSdk = 36' app/build.gradle.kts
 
       - uses: gradle/actions/setup-gradle@v4
         with:
