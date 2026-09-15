@@ -90,7 +90,8 @@ jobs:
           # Exact release identity.
           require_grep 'versionName = "1.2.0"' _src/app/build.gradle.kts
           require_grep 'versionCode = 16' _src/app/build.gradle.kts
-          require_grep 'minorApiLevel = 2' _src/app/build.gradle.kts
+          echo '=== compileSdk configuration ==='
+          grep -n -A8 -B2 'compileSdk' _src/app/build.gradle.kts || true
           require_grep 'ndkVersion = "28.2.13676358"' _src/app/build.gradle.kts
 
           # v1.2 scientific locks.
@@ -148,22 +149,38 @@ jobs:
           test -n "$SDKMANAGER"
           yes | "$SDKMANAGER" --licenses >/dev/null 2>&1 || true
 
-      - name: Install Android API 37.2 build-tools and NDK
+      - name: Install Android SDK packages for v1.2
         shell: bash
         run: |
           set -euo pipefail
-          curl -fsSL https://dl.google.com/android/cli/latest/linux_x86_64/install.sh | bash
-          ANDROID_BIN="$(command -v android || true)"
-          if [ -z "$ANDROID_BIN" ]; then
-            ANDROID_BIN="$(find "$HOME" -type f -name android -perm -u+x 2>/dev/null | head -1 || true)"
+
+          SDKMANAGER="$(find "$ANDROID_SDK_ROOT/cmdline-tools" -type f -name sdkmanager -perm -u+x 2>/dev/null | sort -V | tail -1)"
+          test -n "$SDKMANAGER"
+
+          # github-ready variants may use stable API 36, while the original
+          # v1.2 source uses Android 37.2. Install the stable requirements first.
+          "$SDKMANAGER" --install \
+            'platforms;android-36' \
+            'build-tools;36.0.0' \
+            'ndk;28.2.13676358'
+
+          # If the source actually requests minor API 37.2, install that too.
+          if grep -q 'minorApiLevel[[:space:]]*=[[:space:]]*2' _src/app/build.gradle.kts; then
+            curl -fsSL https://dl.google.com/android/cli/latest/linux_x86_64/install.sh | bash
+            ANDROID_BIN="$(command -v android || true)"
+            if [ -z "$ANDROID_BIN" ]; then
+              ANDROID_BIN="$(find "$HOME" -type f -name android -perm -u+x 2>/dev/null | head -1 || true)"
+            fi
+            test -n "$ANDROID_BIN"
+            "$ANDROID_BIN" --version
+            "$ANDROID_BIN" --sdk="$ANDROID_SDK_ROOT" sdk install --canary \
+              platforms/android-37.2 \
+              build-tools/36.0.0 \
+              ndk/28.2.13676358
+            test -f "$ANDROID_SDK_ROOT/platforms/android-37.2/android.jar"
           fi
-          test -n "$ANDROID_BIN"
-          "$ANDROID_BIN" --version
-          "$ANDROID_BIN" --sdk="$ANDROID_SDK_ROOT" sdk install --canary \
-            platforms/android-37.2 \
-            build-tools/36.0.0 \
-            ndk/28.2.13676358
-          test -f "$ANDROID_SDK_ROOT/platforms/android-37.2/android.jar"
+
+          test -f "$ANDROID_SDK_ROOT/platforms/android-36/android.jar"
           test -d "$ANDROID_SDK_ROOT/ndk/28.2.13676358"
 
       - uses: gradle/actions/setup-gradle@v4
