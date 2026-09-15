@@ -1,0 +1,191 @@
+name: Build WholeBrain Mobile v1.2.0 ZIP
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main ]
+    paths:
+      - 'WholeBrainMobile_v1.2.0_github-ready.zip'
+      - 'WholeBrainMobile_SOURCE_v1.2.0.zip'
+      - '.github/workflows/build-wholebrain-v1-2.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: wholebrain-v1-2-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve and unpack v1.2 source ZIP
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf _src _unpack
+          mkdir -p _src _unpack
+
+          if [ -f WholeBrainMobile_v1.2.0_github-ready.zip ]; then
+            SOURCE_ZIP="$PWD/WholeBrainMobile_v1.2.0_github-ready.zip"
+          elif [ -f WholeBrainMobile_SOURCE_v1.2.0.zip ]; then
+            SOURCE_ZIP="$PWD/WholeBrainMobile_SOURCE_v1.2.0.zip"
+          else
+            echo "ERROR: v1.2 source ZIP not found"
+            exit 1
+          fi
+
+          echo "Using source: $SOURCE_ZIP"
+          unzip -q "$SOURCE_ZIP" -d _unpack
+
+          # Accept either a project at ZIP root or exactly one top-level folder.
+          if [ -f _unpack/app/build.gradle.kts ]; then
+            cp -a _unpack/. _src/
+          else
+            ROOT="$(find _unpack -mindepth 1 -maxdepth 1 -type d | head -1)"
+            test -n "$ROOT"
+            test -f "$ROOT/app/build.gradle.kts"
+            cp -a "$ROOT"/. _src/
+          fi
+
+          rm -rf _unpack
+
+          # Never inherit generated local state from the archive.
+          rm -rf \
+            _src/host-tests/build \
+            _src/app/.cxx \
+            _src/app/build \
+            _src/build \
+            _src/.gradle \
+            _src/dist
+          test -z "$(find _src -name CMakeCache.txt -print -quit)"
+
+          # Exact release identity.
+          test -x _src/scripts/test_host.sh
+          test -x _src/scripts/package_release.sh
+          grep -q 'versionName = "1.2.0"' _src/app/build.gradle.kts
+          grep -q 'versionCode = 16' _src/app/build.gradle.kts
+          grep -q 'minorApiLevel = 2' _src/app/build.gradle.kts
+          grep -q 'ndkVersion = "28.2.13676358"' _src/app/build.gradle.kts
+
+          # v1.2 scientific locks.
+          test -f _src/app/src/main/cpp/cortical_microcircuit.cpp
+          test -f _src/app/src/main/cpp/biospeech_model.cpp
+          test -f _src/host-tests/dynamics_gate.cpp
+          test -f _src/host-tests/topography_gate.cpp
+          test -f _src/host-tests/plasticity_gate.cpp
+          grep -q 'topographicTarget' _src/app/src/main/cpp/wholebrain_engine.cpp
+          grep -q 'longRangeTargetRegion' _src/app/src/main/cpp/wholebrain_engine.cpp
+          grep -q 'updateHomeostasis' _src/app/src/main/cpp/wholebrain_engine.cpp
+          grep -q 'applyPlasticity' _src/app/src/main/cpp/wholebrain_engine.cpp
+
+          # Product/privacy locks.
+          ! grep -RInE 'android\.speech\.tts|TTS_SERVICE|synthesizeToFile' \
+            _src/app/src/main/java _src/app/src/main/AndroidManifest.xml
+          ! grep -q 'android.permission.INTERNET' _src/app/src/main/AndroidManifest.xml
+
+          # Preserve the exact sanitized source used by CI.
+          (
+            cd _src
+            zip -qr "$GITHUB_WORKSPACE/WholeBrainMobile_SOURCE_v1.2.0-CI.zip" . \
+              -x 'host-tests/build/*' 'app/.cxx/*' 'app/build/*' 'build/*' '.gradle/*' 'dist/*'
+          )
+          sha256sum WholeBrainMobile_SOURCE_v1.2.0-CI.zip > WholeBrainMobile_SOURCE_v1.2.0-CI.zip.sha256
+
+      - name: Native v1.2 scientific gates
+        working-directory: _src
+        shell: bash
+        run: |
+          set -euo pipefail
+          timeout --signal=TERM --kill-after=30s 20m \
+            ./scripts/test_host.sh 2>&1 | tee host-tests/V1_2_CI_TEST_OUTPUT.txt
+
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Configure Android SDK from runner
+        shell: bash
+        run: |
+          set -euo pipefail
+          SDK="${ANDROID_SDK_ROOT:-${ANDROID_HOME:-/usr/local/lib/android/sdk}}"
+          test -d "$SDK"
+          echo "ANDROID_HOME=$SDK" >> "$GITHUB_ENV"
+          echo "ANDROID_SDK_ROOT=$SDK" >> "$GITHUB_ENV"
+          echo "$SDK/platform-tools" >> "$GITHUB_PATH"
+          echo "$SDK/cmdline-tools/latest/bin" >> "$GITHUB_PATH"
+          SDKMANAGER="$(find "$SDK/cmdline-tools" -type f -name sdkmanager -perm -u+x 2>/dev/null | sort -V | tail -1)"
+          test -n "$SDKMANAGER"
+          yes | "$SDKMANAGER" --licenses >/dev/null 2>&1 || true
+
+      - name: Install Android API 37.2 build-tools and NDK
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl -fsSL https://dl.google.com/android/cli/latest/linux_x86_64/install.sh | bash
+          ANDROID_BIN="$(command -v android || true)"
+          if [ -z "$ANDROID_BIN" ]; then
+            ANDROID_BIN="$(find "$HOME" -type f -name android -perm -u+x 2>/dev/null | head -1 || true)"
+          fi
+          test -n "$ANDROID_BIN"
+          "$ANDROID_BIN" --version
+          "$ANDROID_BIN" --sdk="$ANDROID_SDK_ROOT" sdk install --canary \
+            platforms/android-37.2 \
+            build-tools/36.0.0 \
+            ndk/28.2.13676358
+          test -f "$ANDROID_SDK_ROOT/platforms/android-37.2/android.jar"
+          test -d "$ANDROID_SDK_ROOT/ndk/28.2.13676358"
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '9.6.0'
+
+      - name: Gradle configuration check
+        working-directory: _src
+        run: gradle --no-daemon help --stacktrace
+
+      - name: Build debug APK
+        working-directory: _src
+        run: gradle --no-daemon :app:assembleDebug --stacktrace
+
+      - name: Package APK
+        working-directory: _src
+        shell: bash
+        run: |
+          set -euo pipefail
+          chmod +x scripts/package_release.sh
+          ./scripts/package_release.sh
+
+      - name: Verify APK
+        working-directory: _src
+        shell: bash
+        run: |
+          set -euo pipefail
+          APK=dist/WholeBrainMobile-1.2.0-debug.apk
+          test -f "$APK"
+          test -f "$APK.sha256"
+          sha256sum -c "$APK.sha256"
+          unzip -tq "$APK"
+          unzip -l "$APK" | grep -q 'lib/arm64-v8a/libwholebrain.so'
+          ls -lh "$APK"
+          sha256sum "$APK"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wholebrain-mobile-1.2.0-debug
+          path: |
+            _src/dist/WholeBrainMobile-1.2.0-debug.apk
+            _src/dist/WholeBrainMobile-1.2.0-debug.apk.sha256
+            _src/dist/WholeBrainMobile-debug.apk
+            _src/dist/WholeBrainMobile-debug.apk.sha256
+            WholeBrainMobile_SOURCE_v1.2.0-CI.zip
+            WholeBrainMobile_SOURCE_v1.2.0-CI.zip.sha256
+            _src/host-tests/V1_2_CI_TEST_OUTPUT.txt
+          if-no-files-found: error
+          retention-days: 30
