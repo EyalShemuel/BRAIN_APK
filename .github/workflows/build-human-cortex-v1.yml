@@ -1,0 +1,116 @@
+name: Build WholeBrain Mobile Human Cortex Scaffold v1.0
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main ]
+    paths:
+      - 'WholeBrainMobile_SOURCE_v1.0.0.zip'
+      - '.github/workflows/build-human-cortex-v1.yml'
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve and unpack v1.0 source
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf _src
+          mkdir -p _src
+          test -f WholeBrainMobile_SOURCE_v1.0.0.zip
+          unzip -q WholeBrainMobile_SOURCE_v1.0.0.zip -d _src
+          rm -rf _src/host-tests/build _src/app/.cxx _src/app/build _src/build _src/.gradle _src/dist
+          test -z "$(find _src -name CMakeCache.txt -print -quit)"
+          test -x _src/scripts/test_host.sh
+          grep -q 'versionName = "1.0.0"' _src/app/build.gradle.kts
+          grep -q 'versionCode = 14' _src/app/build.gradle.kts
+          test -f _src/app/src/main/cpp/cortical_microcircuit.cpp
+          test -f _src/app/src/main/cpp/cortical_microcircuit.h
+          test -f _src/host-tests/cortical_microcircuit_test.cpp
+          test -f _src/V1_0_HUMAN_CORTEX_SCAFFOLD_REPORT_HE.md
+          grep -q 'apicalDendrite_' _src/app/src/main/cpp/wholebrain_engine.cpp
+          grep -q 'CorticalCellClass::LAMP5' _src/app/src/main/cpp/cortical_microcircuit.cpp
+          grep -q 'structuredCorticalTarget' _src/app/src/main/cpp/wholebrain_engine.cpp
+          ! grep -RInE 'android\.speech\.tts|TTS_SERVICE|synthesizeToFile' _src/app/src/main/java _src/app/src/main/AndroidManifest.xml
+          ! grep -q 'android.permission.INTERNET' _src/app/src/main/AndroidManifest.xml
+          (
+            cd _src
+            zip -qr "$GITHUB_WORKSPACE/WholeBrainMobile_SOURCE_v1.0.0-CI.zip" . \
+              -x 'host-tests/build/*' 'app/.cxx/*' 'app/build/*' 'build/*' '.gradle/*' 'dist/*'
+          )
+          sha256sum WholeBrainMobile_SOURCE_v1.0.0-CI.zip > WholeBrainMobile_SOURCE_v1.0.0-CI.zip.sha256
+
+      - name: Native scientific cortical sensory learning and BioSpeech gates
+        working-directory: _src
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./scripts/test_host.sh | tee host-tests/V1_0_CI_TEST_OUTPUT.txt
+
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: android-actions/setup-android@v3
+
+      - name: Install Android CLI and API 37.2
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl -fsSL https://dl.google.com/android/cli/latest/linux_x86_64/install.sh | bash
+          ANDROID_BIN="$(command -v android || true)"
+          if [ -z "$ANDROID_BIN" ]; then
+            ANDROID_BIN="$(find "$HOME" -type f -name android -perm -u+x 2>/dev/null | head -1 || true)"
+          fi
+          test -n "$ANDROID_BIN"
+          "$ANDROID_BIN" --sdk="$ANDROID_SDK_ROOT" sdk install --canary \
+            platforms/android-37.2 build-tools/36.0.0 ndk/28.2.13676358
+          test -f "$ANDROID_SDK_ROOT/platforms/android-37.2/android.jar"
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '9.6.0'
+
+      - name: Gradle configuration check
+        working-directory: _src
+        run: gradle --no-daemon help --stacktrace
+
+      - name: Build debug APK
+        working-directory: _src
+        run: gradle --no-daemon :app:assembleDebug --stacktrace
+
+      - name: Package APK
+        working-directory: _src
+        shell: bash
+        run: |
+          set -euo pipefail
+          chmod +x scripts/package_release.sh
+          ./scripts/package_release.sh
+
+      - name: Verify APK
+        working-directory: _src
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -f dist/WholeBrainMobile-1.0.0-HumanCortexScaffold-debug.apk
+          test -f dist/WholeBrainMobile-1.0.0-HumanCortexScaffold-debug.apk.sha256
+          sha256sum -c dist/WholeBrainMobile-1.0.0-HumanCortexScaffold-debug.apk.sha256
+          sha256sum dist/WholeBrainMobile-1.0.0-HumanCortexScaffold-debug.apk
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wholebrain-mobile-1.0.0-human-cortex-scaffold
+          path: |
+            _src/dist/WholeBrainMobile-1.0.0-HumanCortexScaffold-debug.apk
+            _src/dist/WholeBrainMobile-1.0.0-HumanCortexScaffold-debug.apk.sha256
+            _src/dist/WholeBrainMobile-debug.apk
+            _src/dist/WholeBrainMobile-debug.apk.sha256
+            WholeBrainMobile_SOURCE_v1.0.0-CI.zip
+            WholeBrainMobile_SOURCE_v1.0.0-CI.zip.sha256
+            _src/V1_0_HUMAN_CORTEX_SCAFFOLD_REPORT_HE.md
+            _src/host-tests/V1_0_CI_TEST_OUTPUT.txt
+          if-no-files-found: error
